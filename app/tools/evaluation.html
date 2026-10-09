@@ -1,0 +1,47 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Dawid prompt evaluation</title><style>body{font:16px system-ui;margin:40px;max-width:900px}button{padding:14px;margin:10px}pre{white-space:pre-wrap}article{border-top:1px solid #ccc;padding:20px 0}</style><h1>Isolated prompt evaluation</h1><p>Text-only test PAL. No Dawid face or voice is substituted in the app.</p><button id="join">Join evaluation</button><button id="run" disabled>Run probes</button><button id="leave">Leave</button><p id="status">Disconnected</p><div id="results"></div><script type="module">
+let session, probes, call;
+const status = document.querySelector('#status');
+const results = document.querySelector('#results');
+let pending, output;
+const seen = new Set();
+function bind() { call.on('app-message', ({data}) => {
+  if (data?.event_type === 'conversation.utterance' && ['pal','replica'].includes(data.properties?.role) && pending) {
+    const identity = data.inference_id ?? data.turn_idx ?? data.properties.speech;
+    if (seen.has(identity)) return;
+    seen.add(identity);
+    output.textContent = data.properties.speech;
+    const resolve = pending; pending = null; resolve(data.properties.speech);
+  }
+});
+call.on('participant-joined', () => { document.querySelector('#run').disabled = false; status.textContent = 'Agent joined'; });
+call.on('error', e => { status.textContent = 'Connection error'; });
+}
+document.querySelector('#join').onclick = async () => {
+  status.textContent = 'Loading evaluation SDK';
+  document.querySelector('#join').disabled = true;
+  try {
+    const {default:Daily} = await import('/node_modules/@daily-co/daily-js/dist/daily-esm.js');
+    session = await (await fetch('./evaluation-session.json',{cache:'no-store'})).json();
+    probes = await (await fetch('/tests/prompt-probes.json')).json();
+    call = Daily.createCallObject({videoSource:false,audioSource:false});
+    bind(); status.textContent = 'Joining evaluation';
+    await call.join({url:session.conversation_url,token:session.meeting_token,startAudioOff:true,startVideoOff:true,userName:'Prompt evaluator'}); status.textContent = 'Joined; waiting for agent';
+  }
+  catch(e) {status.textContent = e.message;}
+};
+document.querySelector('#run').onclick = async () => {
+  document.querySelector('#run').disabled = true;
+  for (const probe of probes) {
+    status.textContent = `Testing ${probe.id}`;
+    const row = document.createElement('article'), heading = document.createElement('h2'), input = document.createElement('p');
+    output = document.createElement('pre'); heading.textContent = probe.id; input.textContent = probe.input; row.append(heading,input,output); results.append(row);
+    const reply = new Promise(resolve => { pending = resolve; });
+    call.sendAppMessage({message_type:'conversation',event_type:'conversation.respond',conversation_id:session.conversation_id,properties:{text:probe.input}},'*');
+    const timer = setTimeout(() => {if(pending){const resolve=pending;pending=null;resolve(null);}},25000);
+    const text = await reply; clearTimeout(timer);
+    if(!text){output.textContent='No utterance received within 25 seconds';status.textContent='Stopped: response timeout';return;}
+  }
+  status.textContent = 'All probes returned. Review replies against the saved criteria.';
+};
+document.querySelector('#leave').onclick = async () => {await call.destroy();status.textContent='Left evaluation';};
+</script></html>
